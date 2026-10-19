@@ -15,7 +15,6 @@ from znws.utils.dataset import (
 )
 
 from .config import DEFAULT_RECURSION_LIMIT, build_model
-from .db_router import select_database
 from .dataloader import SchemaPlan, run_data_loader
 from .tracing import DEFAULT_LOG_DIR, RunRecorder
 from .worker import SqlAnswer, run_worker
@@ -88,7 +87,7 @@ def execute_sql_preview(sql: str, max_rows: int = DEFAULT_MAX_ROWS, db_path=None
 def run_sql_agent(
     query: str,
     *,
-    db_id: Optional[str] = None,
+    db_id: str,
     dataset: Optional[str] = None,
     split: Optional[str] = None,
     model_name: Optional[str] = None,
@@ -98,10 +97,8 @@ def run_sql_agent(
     recursion_limit: int = DEFAULT_RECURSION_LIMIT,
     max_rows: int = DEFAULT_MAX_ROWS,
 ) -> SQLAgentResult:
-    """执行一次完整的 Text-to-SQL 运行。
+    """执行一次完整的 Text-to-SQL 运行（针对指定的 db_id）。
 
-    db_id 缺省时，先由模型依据 database_descriptions.json 选择唯一数据库，
-    后续的表目录与 schema 检索都限定在该库内。
     dataset 缺省为 datasets.yaml 中的默认数据集；split 缺省为该数据集的默认切分。
     每次调用都是独立运行：不依赖任何历史状态，也不接收多轮反馈。
     """
@@ -109,24 +106,13 @@ def run_sql_agent(
     dataset = dataset or default_dataset_name()
     split = split or default_split(dataset)
 
+    set_active_database(db_id, split=split, dataset=dataset)
+    ensure_database()
+
     model = build_model(model_name=model_name, base_url=base_url)
     model_label = getattr(model, "model_name", "") or (model_name or "")
 
-    routing_reason = ""
-    if not db_id:
-        db_id, routing_reason = select_database(
-            query, model=model, dataset=dataset, split=split,
-        )
-
-    set_active_database(db_id, split=split, dataset=dataset)
-    ensure_database()
-    resolved_dataset, resolved_split = dataset, split
-
     recorder = RunRecorder(query=query, log_dir=log_dir, echo=echo, model=model_label)
-    if routing_reason:
-        recorder.note("Router", f"数据库路由: {db_id}（{routing_reason}）")
-    else:
-        recorder.note("Router", f"使用显式指定的数据库: {db_id}")
 
     plan: Optional[SchemaPlan] = None
     answer: Optional[SqlAnswer] = None
@@ -154,8 +140,8 @@ def run_sql_agent(
         recorder.note("Pipeline", f"运行异常: {error}")
 
     recorder.finish({
-        "数据集": resolved_dataset,
-        "数据库": f"{db_id} ({resolved_split})",
+        "数据集": dataset,
+        "数据库": f"{db_id} ({split})",
         "模型": model_label,
         "Schema 方案": plan.model_dump() if plan else None,
         "最终 SQL": answer.sql if answer else None,
@@ -167,9 +153,9 @@ def run_sql_agent(
     return SQLAgentResult(
         run_id=recorder.run_id,
         query=query,
-        dataset=resolved_dataset,
+        dataset=dataset,
         db_id=db_id,
-        split=resolved_split,
+        split=split,
         log_path=str(recorder.log_path),
         model=model_label,
         schema_plan=plan.model_dump() if plan else None,

@@ -23,9 +23,11 @@ datasets:
     default_split: train
     splits:
       train:
+        questions: train.json
         tables: train_tables.json
         databases: train_databases
       dev_20240627:
+        questions: dev.json
         tables: dev_tables.json
         databases: dev_databases
     database:

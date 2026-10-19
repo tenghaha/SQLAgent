@@ -1,23 +1,43 @@
-# Web 服务端
-fastapi==0.115.6
-uvicorn==0.48.0
-python-dotenv==1.2.2
+# 仅保留代码中被显式 import 的“最高依赖”，传递依赖交由 pip 解析。
+# 版本取自当前 znws 环境实测。
 
 # Agent 框架与大模型交互
-langgraph==1.0.1
 langchain==1.0.1
+langchain-core==1.4.8
 langchain-openai==1.0.0
+pydantic==2.13.4
 
-
-# 记忆存储与数据处理
-langchain-chroma==1.1.0
-langchain-huggingface==1.2.2
-chromadb==1.5.9
-pandas==2.3.3
-sqlalchemy==2.0.51
-sentence-transformers==5.5.1
-modelscope==1.37.1
-peft==0.19.1
-
-# 数据集配置
+# 配置
+python-dotenv==1.2.2
 pyyaml==6.0.2
+
+# 向量库与本地嵌入
+chromadb==1.5.9
+sentence-transformers==5.5.1
+datasets==2.21.0
+pyarrow==17.0.0
+
+# 数据处理
+pandas==2.3.3
+
+# ---------------------------------------------------------------------------
+# 以下为已暂时移出的依赖（当前代码未显式导入），按需取消注释即可加回。
+# 版本为当前 znws 环境实测，仅供参考。
+# ---------------------------------------------------------------------------
+
+# 传递依赖：由 langchain / sentence-transformers 自动安装，通常无需显式声明
+# langgraph==1.0.1
+# torch==2.12.1
+
+# 原记忆库构建（znws/memory/builder.py）使用
+# langchain-chroma==1.1.0
+# langchain-huggingface==1.2.2
+# modelscope==1.37.1
+# peft==0.19.1
+
+# 原多数据库执行器（agent/tools/db.py）使用
+# sqlalchemy==2.0.51
+
+# 原 Web 服务（FastAPI + 前端）使用
+# fastapi==0.115.6
+# uvicorn==0.48.0

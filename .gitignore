@@ -2,5 +2,6 @@
 tmp
 logs
 data
+preds
 znws/memory/models
 __pycache__

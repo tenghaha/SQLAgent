@@ -3,10 +3,9 @@
 每次执行只处理一个 query，形成一次完全独立的运行（无多轮反馈、无中断）。
 
 用法:
-    python sql_agent_client.py "How many schools are in ..."                    # 由模型依据数据库简述自动选库
-    python sql_agent_client.py --db-id california_schools "How many schools ..." # 显式指定数据库
-    python sql_agent_client.py --dataset bird --split dev_20240627 --verbose
-    python sql_agent_client.py "..." --json                                     # 以 JSON 输出完整结果
+    python sql_agent_client.py --db-id california_schools "How many schools ..."
+    python sql_agent_client.py --db-id financial --split dev_20240627 --verbose
+    python sql_agent_client.py --db-id card_games "..." --json       # 以 JSON 输出完整结果
 """
 import argparse
 import json
@@ -43,7 +42,7 @@ def print_rows(columns, rows, limit=20):
 def main() -> int:
     parser = argparse.ArgumentParser(description="简化版 SQL Agent CLI（单次独立运行）")
     parser.add_argument("query", nargs="?", help="业务问题；缺省时从标准输入读取一条")
-    parser.add_argument("--db-id", default=None, help="数据库标识；缺省时依据 database_descriptions.json 由模型自动选择")
+    parser.add_argument("--db-id", required=True, help="数据库标识（db_id）")
     parser.add_argument("--dataset", default=None, help="datasets.yaml 中登记的数据集名（缺省用配置的 default_dataset）")
     parser.add_argument("--split", default=None, help="切分名（缺省用该数据集的默认切分）")
     parser.add_argument("--model", default=None, help="覆盖环境变量 OPENAI_API_MODEL")

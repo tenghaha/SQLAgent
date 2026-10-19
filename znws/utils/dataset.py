@@ -205,6 +205,27 @@ def databases_dir(split: Optional[str] = None, dataset: Optional[str] = None) ->
     return split_dir(split, dataset) / _split_config(dataset, split)[2]["databases"]
 
 
+def questions_path(split: Optional[str] = None, dataset: Optional[str] = None) -> Path:
+    """该切分的问答文件（如 dev.json / train.json）。"""
+    entry = _split_config(dataset, split)[2]
+    filename = entry.get("questions")
+    if not filename:
+        raise KeyError(
+            "数据集配置中该切分未设置 questions（问答文件），"
+            "请在 datasets.yaml 的 splits.<split> 下补充，例如 questions: dev.json"
+        )
+    return split_dir(split, dataset) / filename
+
+
+def load_questions(split: Optional[str] = None, dataset: Optional[str] = None) -> List[dict]:
+    """读取切分的问答记录列表。"""
+    path = questions_path(split, dataset)
+    if not path.exists():
+        raise FileNotFoundError(f"未找到问答文件 {path}。请确认数据集已解压且配置正确。")
+    with path.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def _database_dir(db_id: str, split: Optional[str], dataset: Optional[str]) -> Path:
     entry = get_dataset_config(dataset)
     template = (entry.get("database") or {}).get("dir_template", DEFAULT_DATABASE_DIR_TEMPLATE)
