@@ -1,0 +1,23 @@
+# Web 服务端
+fastapi==0.115.6
+uvicorn==0.48.0
+python-dotenv==1.2.2
+
+# Agent 框架与大模型交互
+langgraph==1.0.1
+langchain==1.0.1
+langchain-openai==1.0.0
+
+
+# 记忆存储与数据处理
+langchain-chroma==1.1.0
+langchain-huggingface==1.2.2
+chromadb==1.5.9
+pandas==2.3.3
+sqlalchemy==2.0.51
+sentence-transformers==5.5.1
+modelscope==1.37.1
+peft==0.19.1
+
+# 数据集配置
+pyyaml==6.0.2

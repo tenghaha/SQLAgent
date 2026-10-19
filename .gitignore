@@ -1,0 +1,6 @@
+.env
+tmp
+logs
+data
+znws/memory/models
+__pycache__

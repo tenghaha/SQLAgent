@@ -1,0 +1,74 @@
+# ============================================================================
+# 数据集注册表（BIRD-like）
+#
+# 只要把数据集整理成如下结构并在此登记，即可在不改代码的前提下接入：
+#     <root>/<split>/<databases>/<db_id>/<database.dir_template>/<db_id>.sqlite
+#     <root>/<split>/<databases>/<db_id>/<description.dir>/<table>.csv      （可选）
+#     <root>/<split>/<tables_json>      # Spiders 风格 schema 元数据
+#
+# 约定：YAML 中的路径相对工程根目录；文件命名、列名映射均可在各数据集下覆盖。
+# 也可用环境变量 SQLAGENT_DATASET_CONFIG 指向本文件之外的配置。
+# ============================================================================
+
+# 未显式指定 dataset 时使用的默认数据集
+default_dataset: bird
+
+# 本地嵌入模型（相对工程根目录）
+embedder_model_path: znws/memory/models/jinaai/jina-embeddings-v5-text-small
+
+datasets:
+  # ---------------------------------------------------------------- BIRD 官方
+  bird:
+    root: data/BIRD
+    default_split: train
+    splits:
+      train:
+        tables: train_tables.json
+        databases: train_databases
+      dev_20240627:
+        tables: dev_tables.json
+        databases: dev_databases
+    database:
+      dir_template: "{db_id}"            # 库目录名（相对 databases 目录）
+      file_template: "{db_id}.sqlite"    # 库文件名
+    description:
+      dir: database_description
+      file_template: "{table}.csv"
+      encoding: utf-8-sig
+      columns:                           # 描述 CSV 的列名
+        original_name: original_column_name
+        name: column_name
+        description: column_description
+    schema_fields:                       # *_tables.json 的字段名
+      db_id: db_id
+      tables_original: table_names_original
+      tables_readable: table_names
+      columns_original: column_names_original
+      column_types: column_types
+    vector_store:
+      persist_dir: data/schema_sample
+      collection: schema_samples        # 集合名前缀；实际为 <前缀>__<db_id>（一库一集合）
+      # 数据库简述由 LLM 依据表名/字段名生成，写到 <persist_dir>/database_descriptions.json
+
+  # -------------------------------------------- 示例：接入一个自行整理的数据集
+  # my_dataset:
+  #   root: datasets/my_dataset
+  #   default_split: test
+  #   splits:
+  #     test:
+  #       tables: my_tables.json
+  #       databases: databases
+  #   database:
+  #     dir_template: "{db_id}"
+  #     file_template: "{db_id}.sqlite"
+  #   description:
+  #     dir: database_description
+  #     file_template: "{table}.csv"
+  #     encoding: utf-8-sig
+  #     columns:
+  #       original_name: original_column_name
+  #       name: column_name
+  #       description: column_description
+  #   vector_store:
+  #     persist_dir: data/schema_sample_my_dataset
+  #     collection: schema_samples_my_dataset
