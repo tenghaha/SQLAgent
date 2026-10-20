@@ -1,4 +1,4 @@
-"""编排层：把 DataLoader 与 Worker 串成一次独立运行，并产出可复现的结果对象。"""
+"""编排层：把 QueryProcessor、DataLoader 与 Worker 串成一次独立运行，并产出可复现的结果对象。"""
 import math
 import sqlite3
 from dataclasses import asdict, dataclass, field
@@ -16,6 +16,7 @@ from znws.utils.dataset import (
 
 from .config import DEFAULT_RECURSION_LIMIT, build_model
 from .dataloader import SchemaPlan, run_data_loader
+from .query_processor import QueryProcessResult, run_query_processor
 from .tracing import DEFAULT_LOG_DIR, RunRecorder
 from .worker import SqlAnswer, run_worker
 
@@ -37,6 +38,7 @@ class SQLAgentResult:
     final_sql: Optional[str]
     explanation: Optional[str]
     execution: Optional[dict]
+    query_processing: Optional[dict] = None
     steps: list[dict] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     error: Optional[str] = None
@@ -116,12 +118,19 @@ def run_sql_agent(
 
     plan: Optional[SchemaPlan] = None
     answer: Optional[SqlAnswer] = None
+    processed: Optional[QueryProcessResult] = None
     execution: Optional[dict] = None
     error: Optional[str] = None
 
     try:
+        processed = run_query_processor(query=query, model=model, recorder=recorder)
         plan, _ = run_data_loader(
-            query=query, model=model, recorder=recorder, recursion_limit=recursion_limit,
+            query=processed.rewritten_query,
+            entities=processed.entities,
+            sub_queries=processed.sub_queries,
+            model=model,
+            recorder=recorder,
+            recursion_limit=recursion_limit,
         )
         answer, _ = run_worker(
             query=query, plan=plan, model=model, recorder=recorder, recursion_limit=recursion_limit,
@@ -143,6 +152,7 @@ def run_sql_agent(
         "数据集": dataset,
         "数据库": f"{db_id} ({split})",
         "模型": model_label,
+        "Query 处理": processed.to_dict() if processed else None,
         "Schema 方案": plan.model_dump() if plan else None,
         "最终 SQL": answer.sql if answer else None,
         "执行结果": execution,
@@ -162,6 +172,7 @@ def run_sql_agent(
         final_sql=answer.sql if answer else None,
         explanation=answer.explanation if answer else None,
         execution=execution,
+        query_processing=processed.to_dict() if processed else None,
         steps=recorder.steps,
         elapsed_seconds=recorder.elapsed_seconds,
         error=error,

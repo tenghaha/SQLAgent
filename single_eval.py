@@ -120,7 +120,7 @@ def main() -> int:
         print(f"错误 : {result.error}")
 
     if not args.no_save:
-        output_path = Path(args.output) if args.output else Path("preds") / f"preds_{dataset}_{split}.json"
+        output_path = Path(args.output) if args.output else Path("outputs") / "preds" / f"preds_{dataset}_{split}.json"
         records = load_existing(output_path)
         records[args.question_id] = {
             "question_id": args.question_id,

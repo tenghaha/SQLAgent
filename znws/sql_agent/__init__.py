@@ -6,13 +6,17 @@
 """
 from .dataloader import SchemaPlan
 from .pipeline import SQLAgentResult, execute_sql_preview, run_sql_agent
+from .query_processor import QueryEntity, QueryProcessResult, run_query_processor
 from .tracing import RunRecorder
 from .worker import SqlAnswer
 
 __all__ = [
     "run_sql_agent",
     "execute_sql_preview",
+    "run_query_processor",
     "SQLAgentResult",
+    "QueryProcessResult",
+    "QueryEntity",
     "SchemaPlan",
     "SqlAnswer",
     "RunRecorder",

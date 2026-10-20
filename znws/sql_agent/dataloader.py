@@ -39,6 +39,10 @@ SYSTEM_PROMPT_TEMPLATE = """你是数据探查与 Schema 定位专家。用户�
 - search_schema_by_field：按业务术语（如“销量”“产品”）检索 schema 抽样库
 - search_schema_by_value：按具体实体值（如公司名、某类产品名）检索 schema 抽样库
 
+【输入说明】
+- 用户问题已由 QueryProcessor 改写为规范化描述，可能包含多步子句分解；
+- 实体清单来自原始问题，包含时间、地点、组织机构、数值以及“统计指标”，是定位筛选字段与聚合字段的重要线索。
+
 【工作要求】
 1. 先摸清数据库有哪些表，再借助向量库检索缩小到候选表和候选字段。
 2. 允许并鼓励选择多张表：只要问题涉及多个实体或维度，就应把所有必要的表都选出来，不要人为限制为单表。
@@ -47,6 +51,8 @@ SYSTEM_PROMPT_TEMPLATE = """你是数据探查与 Schema 定位专家。用户�
 5. 用户问题中的每一个限定条件（时间、公司、产品、区域等）都必须落到具体字段上，不允许遗漏筛选字段。
 6. 只允许使用真实存在的表和字段，严禁编造；字段一律写成 “表名.字段名”。
 7. 本阶段只负责确认“涉及哪些表与字段”，不要思考、也不要给出 JOIN 条件或连接方式，也不要在 reasoning 中展开表间连接；表间关联由系统在后续自动注入。
+8. 实体清单中的每一项都必须落到具体字段：时间、地点、组织机构、数值对应筛选字段；“统计指标”对应参与聚合的字段。
+9. 若给出【子句分解】，需要覆盖每个子句所需的表和字段，保证多步查询的中间结果与最终统计都能被承载。
 
 【输出】
 探查完成后，必须调用结构化输出工具（SchemaPlan）提交结论，不要只用自然语言作答：
@@ -62,22 +68,57 @@ def build_system_prompt() -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(db_config=load_db_config())
 
 
+def _format_entities(entities: Optional[list[dict]]) -> str:
+    if not entities:
+        return "（未识别出实体）"
+    return "\n".join(
+        f"- {item.get('text', '')}（{item.get('category', '其他')}）"
+        for item in entities
+    )
+
+
+def build_user_input(
+    query: str,
+    entities: Optional[list[dict]] = None,
+    sub_queries: Optional[list[str]] = None,
+) -> str:
+    """组装 DataLoader 输入：规范化 Query、实体清单与子句分解。"""
+    parts = [
+        f"【用户问题（已规范化）】\n{query}",
+        f"【实体清单】\n{_format_entities(entities)}",
+    ]
+    if sub_queries:
+        parts.append(
+            "【子句分解】\n"
+            + "\n".join(f"{index}. {item}" for index, item in enumerate(sub_queries, 1))
+        )
+    parts.append("请基于以上信息探查数据库，确定回答该问题所需的表与字段。")
+    return "\n\n".join(parts)
+
+
 def run_data_loader(
     *,
     query: str,
     model: BaseChatModel,
     recorder: RunRecorder,
+    entities: Optional[list[dict]] = None,
+    sub_queries: Optional[list[str]] = None,
     recursion_limit: int = 30,
 ) -> Tuple[Optional[SchemaPlan], str]:
     """运行 DataLoader agent，返回 (SchemaPlan, 最终文本)。"""
     recorder.agent_start(AGENT_NAME, "探查数据库并确定所需的表与字段")
+    recorder.note(
+        AGENT_NAME,
+        f"接收 QueryProcessor 结果：{len(entities or [])} 个实体，"
+        f"{len(sub_queries or [])} 个子句",
+    )
 
     structured, final_text, _ = run_react_agent(
         agent_name=AGENT_NAME,
         model=model,
         tools=DATA_LOADER_TOOLS,
         system_prompt=build_system_prompt(),
-        user_input=query,
+        user_input=build_user_input(query, entities, sub_queries),
         recorder=recorder,
         response_format=SchemaPlan,
         recursion_limit=recursion_limit,

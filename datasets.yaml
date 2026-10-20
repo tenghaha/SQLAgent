@@ -30,6 +30,11 @@ datasets:
         questions: dev.json
         tables: dev_tables.json
         databases: dev_databases
+      mini_dev:
+        path: MINIDEV                        # 切分目录名与切分名不一致时显式指定
+        questions: mini_dev_sqlite.json
+        tables: dev_tables.json
+        databases: dev_databases
     database:
       dir_template: "{db_id}"            # 库目录名（相对 databases 目录）
       file_template: "{db_id}.sqlite"    # 库文件名
