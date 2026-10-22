@@ -79,6 +79,7 @@ def main() -> int:
     result = run_sql_agent(
         query,
         db_id=gt_db_id,
+        question_id=args.question_id,
         dataset=dataset,
         split=split,
         model_name=args.model,

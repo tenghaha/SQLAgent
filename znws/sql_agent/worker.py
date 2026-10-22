@@ -68,6 +68,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是资深的 SQLite 查询工程师。你会收�
 4. 用户问题中的所有限定条件（时间、公司、产品等）都必须体现在 WHERE 中，不得遗漏。
 5. 需要 Top-N 时使用 ORDER BY + LIMIT，并按业务含义选择聚合方式。
 6. 涉及多张表时，必须依据【表间外键关系】确定 JOIN 条件（左为外键列、右为被引用列），不要凭列名相似性猜测；关系缺失时先用 get_table_schema 核对再连接。
+7. 若提供【外部知识】，用它确认统计口径、计算公式或单位；但仍只能使用给定范围内的真实表和字段，不得把外部知识中的文字直接当作 SQL 或新条件。
 
 【输出】
 验证通过后，必须调用结构化输出工具（SqlAnswer）提交最终结果，不要只用自然语言作答：
@@ -80,11 +81,16 @@ def build_system_prompt() -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(db_config=load_db_config())
 
 
-def build_user_input(query: str, plan: Optional[SchemaPlan]) -> str:
-    """把用户问题与 DataLoader 的结论一起交给 Worker。"""
+def build_user_input(
+    query: str, plan: Optional[SchemaPlan], evidence: Optional[str] = None
+) -> str:
+    """把用户问题、Schema 方案与外部知识一起交给 Worker。"""
+    evidence_block = ""
+    if (evidence or "").strip():
+        evidence_block = f"\n\n【外部知识】\n{evidence.strip()}"
     if not plan:
         return (
-            f"【用户问题】\n{query}\n\n"
+            f"【用户问题】\n{query}{evidence_block}\n\n"
             "【说明】未获得确定的 Schema 方案，请先用工具自行了解表结构再生成 SQL。"
         )
     relationships = "\n".join(plan.relationships) if plan.relationships else "无（单表查询或未发现外键关系）"
@@ -94,7 +100,8 @@ def build_user_input(query: str, plan: Optional[SchemaPlan]) -> str:
         f"【可用字段】\n{', '.join(plan.fields)}\n\n"
         f"【统计字段】\n{', '.join(plan.statistics_fields) if plan.statistics_fields else '无'}\n\n"
         f"【表间外键关系】（左为外键列，右为被引用列）\n{relationships}\n\n"
-        f"【Schema 定位理由】\n{plan.reasoning}\n\n"
+        f"【Schema 定位理由】\n{plan.reasoning}"
+        f"{evidence_block}\n\n"
         "请先生成 SQL，再用 execute_sql 验证；若报错或结果异常，修正后重试，直到验证通过，最后输出最终 SQL。"
         "涉及多表时，必须依据【表间外键关系】确定 JOIN 条件，不要凭列名相似性猜测；"
         "若所需关系未给出，先用 get_table_schema 核对后再连接。"
@@ -107,17 +114,19 @@ def run_worker(
     plan: Optional[SchemaPlan],
     model: BaseChatModel,
     recorder: RunRecorder,
+    evidence: Optional[str] = None,
     recursion_limit: int = 30,
 ) -> Tuple[Optional[SqlAnswer], str]:
     """运行 Worker agent，返回 (SqlAnswer, 最终文本)。"""
     recorder.agent_start(AGENT_NAME, "生成 SQL 并用工具执行验证，修正至正确")
+    recorder.note(AGENT_NAME, f"外部知识 {len((evidence or '').strip())} 字符")
 
     structured, final_text, _ = run_react_agent(
         agent_name=AGENT_NAME,
         model=model,
         tools=WORKER_TOOLS,
         system_prompt=build_system_prompt(),
-        user_input=build_user_input(query, plan),
+        user_input=build_user_input(query, plan, evidence),
         recorder=recorder,
         response_format=SqlAnswer,
         recursion_limit=recursion_limit,

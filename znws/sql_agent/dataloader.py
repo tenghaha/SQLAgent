@@ -41,7 +41,8 @@ SYSTEM_PROMPT_TEMPLATE = """你是数据探查与 Schema 定位专家。用户�
 
 【输入说明】
 - 用户问题已由 QueryProcessor 改写为规范化描述，可能包含多步子句分解；
-- 实体清单来自原始问题，包含时间、地点、组织机构、数值以及“统计指标”，是定位筛选字段与聚合字段的重要线索。
+- 实体清单来自原始问题，包含时间、地点、组织机构、数值以及“统计指标”，是定位筛选字段与聚合字段的重要线索；
+- 【外部知识】是 BIRD 提供的业务口径提示（如计算公式、术语说明），只用于澄清语义，不能替代真实 schema。
 
 【工作要求】
 1. 先摸清数据库有哪些表，再借助向量库检索缩小到候选表和候选字段。
@@ -53,6 +54,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是数据探查与 Schema 定位专家。用户�
 7. 本阶段只负责确认“涉及哪些表与字段”，不要思考、也不要给出 JOIN 条件或连接方式，也不要在 reasoning 中展开表间连接；表间关联由系统在后续自动注入。
 8. 实体清单中的每一项都必须落到具体字段：时间、地点、组织机构、数值对应筛选字段；“统计指标”对应参与聚合的字段。
 9. 若给出【子句分解】，需要覆盖每个子句所需的表和字段，保证多步查询的中间结果与最终统计都能被承载。
+10. 若提供【外部知识】，用它确认业务术语和统计口径对应的字段；不得据此引入与问题无关的新条件。
 
 【输出】
 探查完成后，必须调用结构化输出工具（SchemaPlan）提交结论，不要只用自然语言作答：
@@ -81,8 +83,9 @@ def build_user_input(
     query: str,
     entities: Optional[list[dict]] = None,
     sub_queries: Optional[list[str]] = None,
+    evidence: Optional[str] = None,
 ) -> str:
-    """组装 DataLoader 输入：规范化 Query、实体清单与子句分解。"""
+    """组装 DataLoader 输入：规范化 Query、实体清单、子句分解与外部知识。"""
     parts = [
         f"【用户问题（已规范化）】\n{query}",
         f"【实体清单】\n{_format_entities(entities)}",
@@ -92,6 +95,9 @@ def build_user_input(
             "【子句分解】\n"
             + "\n".join(f"{index}. {item}" for index, item in enumerate(sub_queries, 1))
         )
+    evidence = (evidence or "").strip()
+    if evidence:
+        parts.append(f"【外部知识】\n{evidence}")
     parts.append("请基于以上信息探查数据库，确定回答该问题所需的表与字段。")
     return "\n\n".join(parts)
 
@@ -103,6 +109,7 @@ def run_data_loader(
     recorder: RunRecorder,
     entities: Optional[list[dict]] = None,
     sub_queries: Optional[list[str]] = None,
+    evidence: Optional[str] = None,
     recursion_limit: int = 30,
 ) -> Tuple[Optional[SchemaPlan], str]:
     """运行 DataLoader agent，返回 (SchemaPlan, 最终文本)。"""
@@ -110,7 +117,7 @@ def run_data_loader(
     recorder.note(
         AGENT_NAME,
         f"接收 QueryProcessor 结果：{len(entities or [])} 个实体，"
-        f"{len(sub_queries or [])} 个子句",
+        f"{len(sub_queries or [])} 个子句，外部知识 {len((evidence or '').strip())} 字符",
     )
 
     structured, final_text, _ = run_react_agent(
@@ -118,7 +125,7 @@ def run_data_loader(
         model=model,
         tools=DATA_LOADER_TOOLS,
         system_prompt=build_system_prompt(),
-        user_input=build_user_input(query, entities, sub_queries),
+        user_input=build_user_input(query, entities, sub_queries, evidence),
         recorder=recorder,
         response_format=SchemaPlan,
         recursion_limit=recursion_limit,

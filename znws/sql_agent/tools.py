@@ -4,6 +4,7 @@
 - SQL 工具：znws/agent/tools/sql_tools.py
 - 向量库（schema 抽样库）工具：znws/agent/tools/schema_retriever.py
 """
+from znws.agent.tools.evidence_tools import load_bird_evidence
 from znws.agent.tools.schema_retriever import (
     get_table_directory,
     search_schema_by_field,
@@ -34,4 +35,5 @@ __all__ = [
     "execute_sql",
     "search_schema_by_field",
     "search_schema_by_value",
+    "load_bird_evidence",
 ]

@@ -90,6 +90,7 @@ def run_sql_agent(
     query: str,
     *,
     db_id: str,
+    question_id: Optional[int] = None,
     dataset: Optional[str] = None,
     split: Optional[str] = None,
     model_name: Optional[str] = None,
@@ -101,7 +102,9 @@ def run_sql_agent(
 ) -> SQLAgentResult:
     """执行一次完整的 Text-to-SQL 运行（针对指定的 db_id）。
 
-    dataset 缺省为 datasets.yaml 中的默认数据集；split 缺省为该数据集的默认切分。
+    question_id 用于让 QueryProcessor 通过 load_bird_evidence 读取外部知识；
+    不传时跳过 evidence，仅使用问题文本。dataset 缺省为 datasets.yaml 中的
+    默认数据集；split 缺省为该数据集的默认切分。
     每次调用都是独立运行：不依赖任何历史状态，也不接收多轮反馈。
     """
     load_dotenv()
@@ -123,17 +126,30 @@ def run_sql_agent(
     error: Optional[str] = None
 
     try:
-        processed = run_query_processor(query=query, model=model, recorder=recorder)
+        processed = run_query_processor(
+            query=query,
+            model=model,
+            recorder=recorder,
+            question_id=question_id,
+            dataset=dataset,
+            split=split,
+        )
         plan, _ = run_data_loader(
             query=processed.rewritten_query,
             entities=processed.entities,
             sub_queries=processed.sub_queries,
+            evidence=processed.evidence,
             model=model,
             recorder=recorder,
             recursion_limit=recursion_limit,
         )
         answer, _ = run_worker(
-            query=query, plan=plan, model=model, recorder=recorder, recursion_limit=recursion_limit,
+            query=query,
+            plan=plan,
+            model=model,
+            recorder=recorder,
+            evidence=processed.evidence,
+            recursion_limit=recursion_limit,
         )
         if answer and answer.sql.strip():
             execution = execute_sql_preview(answer.sql, max_rows=max_rows)
