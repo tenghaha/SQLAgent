@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from znws.utils.dataset import database_path, load_questions
+from znws.utils.sql_schema import (
+    aggregate_schema_prf,
+    average_metric,
+    extract_sql_schema,
+    schema_prf,
+)
 
 LEVELS = ["simple", "moderate", "challenging"]
 STRUCTURE_KEYS = [
@@ -175,19 +181,31 @@ def _extract_filter_literals(sql: str) -> List[str]:
     return sorted(literals)
 
 
-def sql_features(sql: str) -> Dict[str, Any]:
-    """提取用于错例归因的轻量 SQL 结构特征。"""
+def sql_features(sql: str, schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """提取用于错例归因的轻量 SQL 结构特征。
+
+    若提供 SQLite authorizer 解析出的 schema，则表集合与字段集合使用
+    引擎真实解析结果；否则回退到正则表名提取（字段为空）。
+    """
     text = _strip_comments(sql or "")
     lowered = text.lower()
-    tables = _extract_tables(text)
     ctes = set(_extract_cte_names(text))
-    physical_tables = sorted(table for table in tables if table not in ctes)
+    schema_ok = bool(schema and schema.get("status") == "ok")
+    if schema_ok:
+        physical_tables = sorted({table.lower() for table in schema.get("tables") or []})
+        fields = sorted({field.lower() for field in schema.get("fields") or []})
+    else:
+        physical_tables = sorted(
+            table for table in _extract_tables(text) if table not in ctes
+        )
+        fields = []
     select_count = len(re.findall(r"\bselect\b", lowered))
     aggregates = sorted(
         set(re.findall(r"\b(count|sum|avg|min|max|total)\s*\(", lowered))
     )
     return {
         "tables": physical_tables,
+        "fields": fields,
         "table_count": len(physical_tables),
         "is_multi_table": len(physical_tables) > 1,
         "select_count": select_count,
@@ -251,6 +269,21 @@ def _classify(
             + (f"; 多余 {extra}" if extra else "")
         )
         signals.append(_signal("table_mismatch", detail))
+
+    gt_fields = set(gt_features.get("fields") or [])
+    pred_fields = set(pred_features.get("fields") or [])
+    if gt_fields != pred_fields:
+        missing_fields = sorted(gt_fields - pred_fields)
+        extra_fields = sorted(pred_fields - gt_fields)
+        detail = (
+            f"字段集合不一致: 缺少 {missing_fields or '无'} / "
+            f"多余 {extra_fields or '无'}"
+        )
+        signals.append(_signal("field_mismatch", detail))
+        if missing_fields:
+            signals.append(_signal("field_missing", f"缺少字段: {missing_fields}"))
+        if extra_fields:
+            signals.append(_signal("field_extra", f"多余字段: {extra_fields}"))
 
     if gt_features["nested"] and not pred_features["nested"]:
         signals.append(_signal("nested_query_missing", "GT 使用子查询/嵌套，Pred 未使用"))
@@ -329,6 +362,8 @@ def _classify(
         return "order_limit_mismatch", signals
     if gt_features["filter_literals"] != pred_features["filter_literals"]:
         return "filter_mismatch", signals
+    if gt_fields != pred_fields:
+        return "field_mismatch", signals
     if gt_col_count != pred_col_count:
         return "projection_mismatch", signals
     if gt_exec.get("row_count") != pred_exec.get("row_count"):
@@ -379,6 +414,76 @@ def _structure_stats(
 # ------------------------------------------------------------------ 主流程
 
 
+def _db_file_for(detail: Dict[str, Any], gt: Dict[str, Any], pred: Dict[str, Any],
+                 dataset: str, split: str) -> Optional[str]:
+    db_id = detail.get("db_id") or gt.get("db_id") or pred.get("db_id")
+    if not db_id:
+        return None
+    try:
+        path = database_path(db_id, split, dataset)
+        return str(path) if path.exists() else None
+    except Exception:
+        return None
+
+
+def _schema_from_detail(
+    detail: Dict[str, Any], side: str, sql: str, db_file: Optional[str]
+) -> Dict[str, Any]:
+    """优先复用评测明细中的 schema 结果，旧报告则现场用 authorizer 提取。"""
+    status_key = f"{side}_schema_status"
+    tables_key = f"{side}_tables"
+    fields_key = f"{side}_fields"
+    error_key = f"{side}_schema_error"
+    if status_key in detail and tables_key in detail:
+        return {
+            "status": detail.get(status_key) or ("ok" if detail.get(tables_key) else "missing"),
+            "tables": detail.get(tables_key) or [],
+            "fields": detail.get(fields_key) or [],
+            "error": detail.get(error_key),
+        }
+    if not (sql or "").strip():
+        return {"status": "empty", "tables": [], "fields": [], "error": None}
+    if not db_file:
+        return {"status": "error", "tables": [], "fields": [], "error": "数据库文件不存在"}
+    return extract_sql_schema(sql, db_file)
+
+
+def _schema_group_stats(
+    details: List[Dict[str, Any]],
+    schema_by_qid: Dict[object, Dict[str, Any]],
+    level: str = "total",
+) -> Dict[str, Any]:
+    table_items: List[Dict[str, Any]] = []
+    field_items: List[Dict[str, Any]] = []
+    for detail in details:
+        qid = detail.get("question_id")
+        schemas = schema_by_qid.get(qid) or {}
+        gt_schema = schemas.get("gt") or {}
+        pred_schema = schemas.get("pred") or {}
+        if gt_schema.get("status") != "ok":
+            continue
+        pred_tables = pred_schema.get("tables") if pred_schema.get("status") == "ok" else []
+        pred_fields = pred_schema.get("fields") if pred_schema.get("status") == "ok" else []
+        table_items.append(schema_prf(pred_tables or [], gt_schema.get("tables") or []))
+        field_items.append(schema_prf(pred_fields or [], gt_schema.get("fields") or []))
+
+    table = aggregate_schema_prf(table_items)
+    field = aggregate_schema_prf(field_items)
+    return {
+        "level": level,
+        "count": len(table_items),
+        "skipped": len(details) - len(table_items),
+        "table_precision": table["precision"],
+        "table_recall": table["recall"],
+        "table_precision_macro": average_metric(table_items, "precision"),
+        "table_recall_macro": average_metric(table_items, "recall"),
+        "field_precision": field["precision"],
+        "field_recall": field["recall"],
+        "field_precision_macro": average_metric(field_items, "precision"),
+        "field_recall_macro": average_metric(field_items, "recall"),
+    }
+
+
 def analyze_errors(
     *,
     eval_report_path,
@@ -407,16 +512,34 @@ def analyze_errors(
         item.get("question_id"): item for item in preds if "question_id" in item
     }
 
+    schema_by_qid: Dict[object, Dict[str, Any]] = {}
     all_features: Dict[object, Dict[str, Any]] = {}
     for detail in details:
         qid = detail.get("question_id")
         gt = gt_map.get(qid) or {}
-        all_features[qid] = sql_features(gt.get("SQL") or "")
+        pred = pred_map.get(qid) or {}
+        gt_sql = (gt.get("SQL") or "").strip()
+        pred_sql = (pred.get("SQL") or "").strip()
+        db_file = _db_file_for(detail, gt, pred, dataset, split)
+        gt_schema = _schema_from_detail(detail, "gt", gt_sql, db_file)
+        pred_schema = _schema_from_detail(detail, "pred", pred_sql, db_file)
+        schema_by_qid[qid] = {
+            "gt": gt_schema,
+            "pred": pred_schema,
+            "db_file": db_file,
+        }
+        all_features[qid] = sql_features(gt_sql, gt_schema)
 
     error_details = [detail for detail in details if detail.get("ex") != 1]
     error_ids = {detail.get("question_id") for detail in error_details}
 
     errors: List[Dict[str, Any]] = []
+    missing_field_counter: Counter = Counter()
+    missing_table_counter: Counter = Counter()
+    empty_prf = {
+        "precision": None, "recall": None, "tp": 0, "fp": 0, "fn": 0,
+        "pred_count": 0, "gt_count": 0,
+    }
     for detail in error_details:
         qid = detail.get("question_id")
         gt = gt_map.get(qid) or {}
@@ -426,17 +549,42 @@ def analyze_errors(
         pred_sql = (pred.get("SQL") or "").strip()
         db_id = detail.get("db_id") or gt.get("db_id") or pred.get("db_id")
 
-        gt_features = sql_features(gt_sql)
-        pred_features = sql_features(pred_sql)
+        schemas = schema_by_qid.get(qid) or {}
+        gt_schema = schemas.get("gt") or {
+            "status": "missing", "tables": [], "fields": [], "error": None,
+        }
+        pred_schema = schemas.get("pred") or {
+            "status": "missing", "tables": [], "fields": [], "error": None,
+        }
+        db_file = schemas.get("db_file")
+        gt_features = all_features.get(qid) or sql_features(gt_sql, gt_schema)
+        pred_features = sql_features(pred_sql, pred_schema)
 
-        db_file = None
-        if db_id:
-            try:
-                candidate = database_path(db_id, split, dataset)
-                if candidate.exists():
-                    db_file = str(candidate)
-            except Exception:
-                db_file = None
+        schema_counted = gt_schema.get("status") == "ok"
+        pred_tables = (
+            pred_schema.get("tables") if pred_schema.get("status") == "ok" else []
+        ) or []
+        pred_fields = (
+            pred_schema.get("fields") if pred_schema.get("status") == "ok" else []
+        ) or []
+        if schema_counted:
+            gt_tables = gt_schema.get("tables") or []
+            gt_fields = gt_schema.get("fields") or []
+            table_prf = schema_prf(pred_tables, gt_tables)
+            field_prf = schema_prf(pred_fields, gt_fields)
+            missing_tables = sorted(set(gt_tables) - set(pred_tables))
+            extra_tables = sorted(set(pred_tables) - set(gt_tables))
+            missing_fields = sorted(set(gt_fields) - set(pred_fields))
+            extra_fields = sorted(set(pred_fields) - set(gt_fields))
+            missing_table_counter.update(missing_tables)
+            missing_field_counter.update(missing_fields)
+        else:
+            table_prf = dict(empty_prf)
+            field_prf = dict(empty_prf)
+            missing_tables = []
+            extra_tables = []
+            missing_fields = []
+            extra_fields = []
 
         if db_file is None:
             gt_exec = {
@@ -502,6 +650,13 @@ def analyze_errors(
             "pred_features": pred_features,
             "gt_exec": gt_exec,
             "pred_exec": pred_exec,
+            "schema_counted": schema_counted,
+            "table_prf": table_prf,
+            "field_prf": field_prf,
+            "missing_tables": missing_tables,
+            "extra_tables": extra_tables,
+            "missing_fields": missing_fields,
+            "extra_fields": extra_fields,
             "cause": cause,
             "signals": signals,
         })
@@ -555,6 +710,19 @@ def analyze_errors(
         signal["key"] for error in errors for signal in error["signals"]
     )
 
+    schema_total = _schema_group_stats(details, schema_by_qid, "total")
+    schema_difficulties = []
+    for level in LEVELS + ["unknown"]:
+        level_details = [
+            detail for detail in details
+            if (detail.get("difficulty") or "unknown") == level
+        ]
+        if level_details:
+            schema_difficulties.append(
+                _schema_group_stats(level_details, schema_by_qid, level)
+            )
+    schema_errors = _schema_group_stats(error_details, schema_by_qid, "errors")
+
     db_totals: Counter = Counter()
     db_errors: Counter = Counter()
     for detail in details:
@@ -603,6 +771,12 @@ def analyze_errors(
             "ex": _percent(correct, total),
             "status_counts_all": dict(status_counts_all),
             "status_counts_errors": dict(status_counts_errors),
+            "table_precision": schema_total["table_precision"],
+            "table_recall": schema_total["table_recall"],
+            "field_precision": schema_total["field_precision"],
+            "field_recall": schema_total["field_recall"],
+            "schema_count": schema_total["count"],
+            "schema_skipped": schema_total["skipped"],
         },
         "difficulty_stats": difficulty_stats,
         "structure_stats": structure_stats,
@@ -616,6 +790,19 @@ def analyze_errors(
         "cross_stats": cross_stats,
         "cause_counts": dict(cause_counts.most_common()),
         "signal_counts": dict(signal_counts.most_common()),
+        "schema_stats": {
+            "total": schema_total,
+            "difficulties": schema_difficulties,
+            "errors": schema_errors,
+        },
+        "top_missing_fields": [
+            {"field": key, "count": count}
+            for key, count in missing_field_counter.most_common(30)
+        ],
+        "top_missing_tables": [
+            {"table": key, "count": count}
+            for key, count in missing_table_counter.most_common(30)
+        ],
         "db_stats": db_stats,
         "sample_ids": sample_ids,
         "errors": errors,
@@ -627,6 +814,18 @@ def analyze_errors(
 
 def _format_list(values: List[Any]) -> str:
     return ", ".join(str(value) for value in values) if values else "无"
+
+
+def _format_pct(value: Optional[float]) -> str:
+    return "N/A" if value is None else f"{value * 100:.2f}%"
+
+
+def _format_prf(prf: Dict[str, Any]) -> str:
+    precision = prf.get("precision")
+    recall = prf.get("recall")
+    if precision is None or recall is None:
+        return "N/A"
+    return f"{precision * 100:.1f}% / {recall * 100:.1f}%"
 
 
 def _format_exec(exec_info: Dict[str, Any]) -> str:
@@ -697,6 +896,13 @@ def _case_markdown(entry: Dict[str, Any], index: int) -> str:
         "**结构差异**：",
         "",
         f"- 表：GT={entry['gt_features']['tables']} / Pred={entry['pred_features']['tables']}",
+        f"- 字段：GT={entry['gt_features']['fields']} / Pred={entry['pred_features']['fields']}",
+        f"- 缺失表：{_format_list(entry.get('missing_tables') or [])}；"
+        f"多余表：{_format_list(entry.get('extra_tables') or [])}",
+        f"- 缺失字段：{_format_list(entry.get('missing_fields') or [])}；"
+        f"多余字段：{_format_list(entry.get('extra_fields') or [])}",
+        f"- Table P/R：{_format_prf(entry.get('table_prf') or {})}；"
+        f"Field P/R：{_format_prf(entry.get('field_prf') or {})}",
         f"- 嵌套：GT={entry['gt_features']['nested']} / Pred={entry['pred_features']['nested']}",
         f"- 聚合：GT={_format_list(entry['gt_features']['aggregates'])} / "
         f"Pred={_format_list(entry['pred_features']['aggregates'])}",
@@ -728,7 +934,13 @@ def render_markdown(result: Dict[str, Any]) -> str:
         f"- 预测文件：{result['preds_path']}",
         f"- 评测明细：{result['eval_report_path']}",
         f"- 总体 EX：{summary['ex']:.2f}%（{summary['ex_correct']}/{summary['total']}）",
+        f"- 总体表 P/R（micro）：{_format_pct(summary.get('table_precision'))} / "
+        f"{_format_pct(summary.get('table_recall'))}",
+        f"- 总体字段 P/R（micro）：{_format_pct(summary.get('field_precision'))} / "
+        f"{_format_pct(summary.get('field_recall'))}",
         f"- 错例数：{summary['errors']}",
+        f"- Schema 参与统计：{summary.get('schema_count', 0)} 题"
+        f"（跳过 {summary.get('schema_skipped', 0)} 题）",
         f"- 抽样数：{result['sample_size']}（seed={result['seed']}）",
         "",
         "## 1. 错例状态与难度分布",
@@ -820,9 +1032,72 @@ def render_markdown(result: Dict[str, Any]) -> str:
     for signal_key, count in result["signal_counts"].items():
         lines.append(f"| {signal_key} | {count} |")
 
+    schema_stats = result.get("schema_stats") or {}
+    schema_total = schema_stats.get("total") or {}
+    schema_errors = schema_stats.get("errors") or {}
     lines += [
         "",
-        "## 4. 数据库错误分布（前 15）",
+        "## 4. 表 / 字段级分析（Schema Linking）",
+        "",
+        f"- 全量（micro）：表 P/R "
+        f"{_format_pct(schema_total.get('table_precision'))} / "
+        f"{_format_pct(schema_total.get('table_recall'))}；字段 P/R "
+        f"{_format_pct(schema_total.get('field_precision'))} / "
+        f"{_format_pct(schema_total.get('field_recall'))}",
+        f"- 全量（macro，题均）：表 P/R "
+        f"{_format_pct(schema_total.get('table_precision_macro'))} / "
+        f"{_format_pct(schema_total.get('table_recall_macro'))}；字段 P/R "
+        f"{_format_pct(schema_total.get('field_precision_macro'))} / "
+        f"{_format_pct(schema_total.get('field_recall_macro'))}",
+        f"- 错例（micro，{schema_errors.get('count', 0)} 题）：表 P/R "
+        f"{_format_pct(schema_errors.get('table_precision'))} / "
+        f"{_format_pct(schema_errors.get('table_recall'))}；字段 P/R "
+        f"{_format_pct(schema_errors.get('field_precision'))} / "
+        f"{_format_pct(schema_errors.get('field_recall'))}",
+        "",
+        "| 难度 | Schema 题数 | Table P | Table R | Field P | Field R |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for item in schema_stats.get("difficulties") or []:
+        lines.append(
+            f"| {item['level']} | {item.get('count', 0)} | "
+            f"{_format_pct(item.get('table_precision'))} | "
+            f"{_format_pct(item.get('table_recall'))} | "
+            f"{_format_pct(item.get('field_precision'))} | "
+            f"{_format_pct(item.get('field_recall'))} |"
+        )
+
+    lines += [
+        "",
+        "### 4.1 错例中缺失最多的字段（前 15）",
+        "",
+        "| 字段 | 缺失次数 |",
+        "| --- | ---: |",
+    ]
+    top_fields = result.get("top_missing_fields") or []
+    if top_fields:
+        for item in top_fields[:15]:
+            lines.append(f"| {item['field']} | {item['count']} |")
+    else:
+        lines.append("| （无） | 0 |")
+
+    lines += [
+        "",
+        "### 4.2 错例中缺失最多的表（前 10）",
+        "",
+        "| 表 | 缺失次数 |",
+        "| --- | ---: |",
+    ]
+    top_tables = result.get("top_missing_tables") or []
+    if top_tables:
+        for item in top_tables[:10]:
+            lines.append(f"| {item['table']} | {item['count']} |")
+    else:
+        lines.append("| （无） | 0 |")
+
+    lines += [
+        "",
+        "## 5. 数据库错误分布（前 15）",
         "",
         "| 数据库 | 总题数 | 错例数 | 错误率 |",
         "| --- | ---: | ---: | ---: |",
@@ -835,7 +1110,7 @@ def render_markdown(result: Dict[str, Any]) -> str:
 
     lines += [
         "",
-        f"## 5. 错例抽样对比（{len(sample_entries)} 例）",
+        f"## 6. 错例抽样对比（{len(sample_entries)} 例）",
         "",
     ]
     for index, entry in enumerate(sample_entries, 1):
@@ -843,10 +1118,10 @@ def render_markdown(result: Dict[str, Any]) -> str:
 
     lines += [
         "",
-        "## 6. 全量错例清单",
+        "## 7. 全量错例清单",
         "",
-        "| question_id | 数据库 | 难度 | 状态 | 主归因 | GT 行×列 | Pred 行×列 |",
-        "| ---: | --- | --- | --- | --- | --- | --- |",
+        "| question_id | 数据库 | 难度 | 状态 | 主归因 | GT 行×列 | Pred 行×列 | Table P/R | Field P/R | 缺失字段数 |",
+        "| ---: | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |",
     ]
     for error in sorted(errors, key=lambda item: item["question_id"]):
         gt_exec = error["gt_exec"]
@@ -861,21 +1136,27 @@ def render_markdown(result: Dict[str, Any]) -> str:
         )
         lines.append(
             f"| {error['question_id']} | {error['db_id']} | {error['difficulty']} | "
-            f"{error['status']} | {error['cause']} | {gt_shape} | {pred_shape} |"
+            f"{error['status']} | {error['cause']} | {gt_shape} | {pred_shape} | "
+            f"{_format_prf(error.get('table_prf') or {})} | "
+            f"{_format_prf(error.get('field_prf') or {})} | "
+            f"{len(error.get('missing_fields') or [])} |"
         )
 
     lines += [
         "",
-        "## 7. 方法与口径",
+        "## 8. 方法与口径",
         "",
         "- 错例集合直接采用评测明细中 `ex=0` 的题目，与官方 EX（执行结果集相等）保持一致。",
-        "- 查询结构特征从 SQL 文本提取：GT 表集合、是否含子查询、聚合函数、JOIN 数、"
+        "- 表 / 字段集合优先读取评测明细；旧报告则通过 SQLite authorizer + `EXPLAIN` "
+        "从 GT/Pred SQL 提取实际读取的表与列（含 JOIN/WHERE/GROUP BY/ORDER BY 引用的列），"
+        "只做 prepare、不执行查询。",
+        "- 查询结构特征从 SQL 文本提取：是否含子查询、聚合函数、JOIN 数、"
         "GROUP BY/HAVING、ORDER BY/LIMIT、过滤字面量等。",
-        "- 主归因是规则优先级结果，`signals` 保留全部可疑信号；规则无法区分时标为 "
-        "`value_mismatch`，需要人工结合结果样例判断。",
+        "- 主归因是规则优先级结果，`signals` 保留全部可疑信号；`field_mismatch` 表示"
+        "表一致但字段集合不同；规则无法区分时标为 `value_mismatch`，需人工结合结果样例判断。",
         "- 结果摘要通过重新执行 SQL 获得，单条执行超时可配置；评测中已知的 GT 超时/预测超时"
         "不会重复执行。",
-        "- 全量错例的 SQL、结果样例与结构特征保存在同名 JSON，CSV 便于表格化人工复核。",
+        "- 全量错例的 SQL、结果样例、表/字段集合与 P/R 保存在同名 JSON，CSV 便于表格化人工复核。",
         "",
     ]
     return "\n".join(lines)
@@ -902,6 +1183,9 @@ def write_analysis(result: Dict[str, Any], output_dir) -> Tuple[Path, Path, Path
         "gt_status", "gt_columns", "gt_row_count", "gt_distinct_row_count",
         "pred_status", "pred_columns", "pred_row_count", "pred_distinct_row_count",
         "gt_tables", "pred_tables", "gt_nested", "pred_nested",
+        "gt_fields", "pred_fields", "missing_tables", "extra_tables",
+        "missing_fields", "extra_fields", "schema_counted",
+        "table_precision", "table_recall", "field_precision", "field_recall",
         "gt_aggregates", "pred_aggregates", "gt_joins", "pred_joins",
         "gt_filter_literals", "pred_filter_literals", "pred_error",
     ]
@@ -938,6 +1222,17 @@ def write_analysis(result: Dict[str, Any], output_dir) -> Tuple[Path, Path, Path
                 "pred_tables": " | ".join(error["pred_features"]["tables"]),
                 "gt_nested": error["gt_features"]["nested"],
                 "pred_nested": error["pred_features"]["nested"],
+                "gt_fields": " | ".join(error["gt_features"]["fields"]),
+                "pred_fields": " | ".join(error["pred_features"]["fields"]),
+                "missing_tables": " | ".join(error.get("missing_tables") or []),
+                "extra_tables": " | ".join(error.get("extra_tables") or []),
+                "missing_fields": " | ".join(error.get("missing_fields") or []),
+                "extra_fields": " | ".join(error.get("extra_fields") or []),
+                "schema_counted": error.get("schema_counted"),
+                "table_precision": error["table_prf"].get("precision"),
+                "table_recall": error["table_prf"].get("recall"),
+                "field_precision": error["field_prf"].get("precision"),
+                "field_recall": error["field_prf"].get("recall"),
                 "gt_aggregates": " | ".join(error["gt_features"]["aggregates"]),
                 "pred_aggregates": " | ".join(error["pred_features"]["aggregates"]),
                 "gt_joins": error["gt_features"]["joins"],

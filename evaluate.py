@@ -1,7 +1,9 @@
-"""独立评测：读取 preds.json 与金标，产出 EX / VES / SQL 执行耗时报告。
+"""独立评测：读取 preds.json 与金标，产出 EX / VES / 执行耗时 / 表字段 P/R 报告。
 
 指标口径遵循 BIRD 官方仓库（D:/DAMO-ConvAI/bird）的 evaluation.py 与
-evaluation_ves.py；报告同时写出 Markdown 与同名 JSON 明细。
+evaluation_ves.py；表/字段 P/R 通过 SQLite authorizer 从 GT/Pred SQL 中
+提取实际读取的表与列，不需要 BIRD 的显式 schema 标注。
+报告同时写出 Markdown 与同名 JSON 明细。
 
 用法:
     python evaluate.py --split dev_20240627
@@ -29,7 +31,7 @@ def _infer_from_preds(preds_path: Path) -> Tuple[Optional[str], Optional[str]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="评测 BIRD 格式 preds.json（EX / VES / 执行耗时）")
+    parser = argparse.ArgumentParser(description="评测 BIRD 格式 preds.json（EX / VES / 耗时 / 表字段 P-R）")
     parser.add_argument("--dataset", default=None, help="数据集名（缺省用 datasets.yaml 的 default_dataset）")
     parser.add_argument("--split", default=None, help="切分名（缺省从 preds 文件名推断，否则用默认切分）")
     parser.add_argument("--preds", default=None, help="preds.json 路径（缺省为 outputs/preds/preds_<dataset>_<split>.json）")

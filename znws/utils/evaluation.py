@@ -1,4 +1,4 @@
-"""BIRD 官方口径评测：EX、VES 与 SQL 实际执行耗时。
+"""BIRD 官方口径评测：EX、VES、SQL 实际执行耗时与表/字段 P/R。
 
 指标实现参照官方仓库 ``D:/DAMO-ConvAI/bird``：
 
@@ -7,6 +7,8 @@
         取 ``ratio = gt_time / pred_time``，经官方 3σ 规则过滤后求均值，
         ``VES = sqrt(ratio) * 100``；错误、超时与未命中的题目计 0。
 - 耗时: 不含 SQL 生成时间，只统计 sqlite 执行。
+- 表/字段 P/R: 通过 SQLite authorizer + ``EXPLAIN`` 从 GT/Pred SQL 中提取
+  实际读取的表与列，只做 prepare、不执行查询；同时给出 micro 与 macro 口径。
 
 与官方的唯一差异在计时范围：官方只计 ``cursor.execute`` 的耗时，但 Python
 sqlite3 对 SELECT 是惰性执行，实际计算多发生在 ``fetchall``；为反映真实执行
@@ -28,6 +30,12 @@ from znws.utils.dataset import (
     default_dataset_name,
     default_split,
     load_questions,
+)
+from znws.utils.sql_schema import (
+    aggregate_schema_prf,
+    average_metric,
+    extract_sql_schema,
+    schema_prf,
 )
 
 LEVELS = ["simple", "moderate", "challenging"]
@@ -92,7 +100,29 @@ def _evaluate_one(task: dict) -> dict:
         "elapsed_ms": None,
         "status": "ok",
         "error": None,
+        "gt_schema_status": "missing",
+        "pred_schema_status": "missing",
+        "gt_schema_error": None,
+        "pred_schema_error": None,
+        "gt_tables": [],
+        "pred_tables": [],
+        "gt_fields": [],
+        "pred_fields": [],
     }
+
+    # 表/字段提取只做 prepare，不执行查询；即使后续执行超时也可获得 schema
+    gt_schema = extract_sql_schema(task["gt_sql"], task["db_path"])
+    pred_schema = extract_sql_schema(task["pred_sql"], task["db_path"])
+    result.update({
+        "gt_schema_status": gt_schema["status"],
+        "pred_schema_status": pred_schema["status"],
+        "gt_schema_error": gt_schema.get("error"),
+        "pred_schema_error": pred_schema.get("error"),
+        "gt_tables": gt_schema["tables"],
+        "pred_tables": pred_schema["tables"],
+        "gt_fields": gt_schema["fields"],
+        "pred_fields": pred_schema["fields"],
+    })
 
     try:
         pred_rows, pred_exec, pred_elapsed = _execute_sql(
@@ -155,6 +185,16 @@ def _build_result(
     details = sorted(pre_results + task_results, key=lambda item: item["order"])
     for item in details:
         item.pop("order", None)
+        if item.get("gt_schema_status") == "ok":
+            item["table_prf"] = schema_prf(
+                item.get("pred_tables") or [], item.get("gt_tables") or []
+            )
+            item["field_prf"] = schema_prf(
+                item.get("pred_fields") or [], item.get("gt_fields") or []
+            )
+            item["schema_counted"] = True
+        else:
+            item["schema_counted"] = False
 
     executed = [item for item in details if item["elapsed_ms"] is not None]
     status_counts: Dict[str, int] = {}
@@ -172,6 +212,9 @@ def _build_result(
             continue
         correct = sum(item["ex"] for item in group)
         timings = [item["elapsed_ms"] for item in group if item["elapsed_ms"] is not None]
+        schema_items = [item for item in group if item.get("schema_counted")]
+        table_prf = aggregate_schema_prf([item["table_prf"] for item in schema_items])
+        field_prf = aggregate_schema_prf([item["field_prf"] for item in schema_items])
         metrics[level] = {
             "count": len(group),
             "ex_count": correct,
@@ -179,6 +222,24 @@ def _build_result(
             "ves": sum(item["ves"] for item in group) / len(group),
             "exec_count": len(timings),
             "avg_exec_ms": sum(timings) / len(timings) if timings else None,
+            "schema_count": len(schema_items),
+            "schema_skipped": len(group) - len(schema_items),
+            "table_precision": table_prf["precision"],
+            "table_recall": table_prf["recall"],
+            "table_precision_macro": average_metric(
+                [item["table_prf"] for item in schema_items], "precision"
+            ),
+            "table_recall_macro": average_metric(
+                [item["table_prf"] for item in schema_items], "recall"
+            ),
+            "field_precision": field_prf["precision"],
+            "field_recall": field_prf["recall"],
+            "field_precision_macro": average_metric(
+                [item["field_prf"] for item in schema_items], "precision"
+            ),
+            "field_recall_macro": average_metric(
+                [item["field_prf"] for item in schema_items], "recall"
+            ),
         }
 
     return {
@@ -196,6 +257,8 @@ def _build_result(
             "evaluated": len(details),
             "executed": len(executed),
             "ex_correct": sum(item["ex"] for item in details),
+            "schema_evaluated": sum(1 for item in details if item.get("schema_counted")),
+            "schema_skipped": sum(1 for item in details if not item.get("schema_counted")),
         },
         "metrics": metrics,
         "status_counts": status_counts,
@@ -249,15 +312,18 @@ def evaluate_preds(
             "exec_ms": None,
             "elapsed_ms": None,
             "error": None,
+            "gt_schema_status": "missing",
+            "pred_schema_status": "missing",
+            "gt_schema_error": None,
+            "pred_schema_error": None,
+            "gt_tables": [],
+            "pred_tables": [],
+            "gt_fields": [],
+            "pred_fields": [],
         }
 
         if gt is None:
             pre_results.append({**base, "status": "missing_gt"})
-            continue
-
-        pred_sql = (record.get("SQL") or "").strip()
-        if not pred_sql:
-            pre_results.append({**base, "status": "empty_sql"})
             continue
 
         gt_sql = (gt.get("SQL") or "").strip()
@@ -268,7 +334,23 @@ def evaluate_preds(
         db_id = record.get("db_id") or gt.get("db_id")
         db_file = database_path(db_id, split_name, dataset_name) if db_id else None
         if not db_file or not db_file.exists():
-            pre_results.append({**base, "status": "db_not_found"})
+            pre_results.append({**base, "db_id": db_id, "status": "db_not_found"})
+            continue
+
+        base["db_id"] = db_id
+        pred_sql = (record.get("SQL") or "").strip()
+        if not pred_sql:
+            # 预测为空时仍提取 GT schema，使表/字段指标能计入该题
+            gt_schema = extract_sql_schema(gt_sql, str(db_file))
+            pre_results.append({
+                **base,
+                "status": "empty_sql",
+                "gt_schema_status": gt_schema["status"],
+                "gt_schema_error": gt_schema.get("error"),
+                "gt_tables": gt_schema["tables"],
+                "gt_fields": gt_schema["fields"],
+                "pred_schema_status": "empty",
+            })
             continue
 
         tasks.append({
@@ -342,7 +424,13 @@ def format_summary(result: dict) -> str:
         f"VES: {total['ves']:.2f} | "
         f"平均 SQL 执行耗时: {_format_ms(total['avg_exec_ms'])}"
         f"（n={total['exec_count']}，不含生成时间）\n"
-        f"预测 {counts['preds']} 条，可执行 {counts['executed']} 条。"
+        f"表 P/R: {_format_pct(total.get('table_precision'))} / "
+        f"{_format_pct(total.get('table_recall'))}（micro） | "
+        f"字段 P/R: {_format_pct(total.get('field_precision'))} / "
+        f"{_format_pct(total.get('field_recall'))}（micro）\n"
+        f"预测 {counts['preds']} 条，可执行 {counts['executed']} 条，"
+        f"Schema 参与统计 {counts.get('schema_evaluated', 0)} 条"
+        f"（跳过 {counts.get('schema_skipped', 0)} 条）。"
     )
 
 
@@ -352,6 +440,10 @@ def _format_ms(value: Optional[float]) -> str:
 
 def _format_rate(value: float) -> str:
     return f"{value:.2f}"
+
+
+def _format_pct(value: Optional[float]) -> str:
+    return "N/A" if value is None else f"{value * 100:.2f}%"
 
 
 def render_markdown(result: dict) -> str:
@@ -380,6 +472,12 @@ def render_markdown(result: dict) -> str:
         f"- **VES（Valid Efficiency Score）**: {_format_rate(total.get('ves', 0.0))}",
         f"- **平均 SQL 执行耗时**: {_format_ms(total.get('avg_exec_ms'))}"
         f"（n={counts['executed']}，仅 SQL 执行，不含生成时间）",
+        f"- **表级 Precision / Recall（micro）**: "
+        f"{_format_pct(total.get('table_precision'))} / "
+        f"{_format_pct(total.get('table_recall'))}",
+        f"- **字段级 Precision / Recall（micro）**: "
+        f"{_format_pct(total.get('field_precision'))} / "
+        f"{_format_pct(total.get('field_recall'))}",
         "",
         "## 分难度指标",
         "",
@@ -395,6 +493,33 @@ def render_markdown(result: dict) -> str:
             f"| {level} | {metric['count']} | {metric['ex']:.2f} | "
             f"{metric['ex_count']} | {metric['ves']:.2f} | "
             f"{_format_ms(metric['avg_exec_ms'])} |"
+        )
+
+    lines += [
+        "",
+        "## Schema Linking（表 / 字段）",
+        "",
+        f"- 参与统计: {total.get('schema_count', 0)} 题；"
+        f"跳过 {total.get('schema_skipped', 0)} 题（GT schema 不可解析或缺少 GT SQL）。",
+        f"- Macro（题均）: 表 P/R "
+        f"{_format_pct(total.get('table_precision_macro'))} / "
+        f"{_format_pct(total.get('table_recall_macro'))}；字段 P/R "
+        f"{_format_pct(total.get('field_precision_macro'))} / "
+        f"{_format_pct(total.get('field_recall_macro'))}。",
+        "",
+        "| 难度 | 题数 | Schema 题数 | Table P | Table R | Field P | Field R |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for level in LEVELS + ["unknown", "total"]:
+        metric = result["metrics"].get(level)
+        if not metric:
+            continue
+        lines.append(
+            f"| {level} | {metric['count']} | {metric.get('schema_count', 0)} | "
+            f"{_format_pct(metric.get('table_precision'))} | "
+            f"{_format_pct(metric.get('table_recall'))} | "
+            f"{_format_pct(metric.get('field_precision'))} | "
+            f"{_format_pct(metric.get('field_recall'))} |"
         )
 
     lines += [
@@ -432,6 +557,11 @@ def render_markdown(result: dict) -> str:
         "3σ 异常值过滤规则与官方 `clean_abnormal` 一致；错误/超时/未命中计 0。",
         "- **执行耗时**：仅统计 sqlite 中 SQL 的实际执行（含结果读取），"
         "不含 LLM 生成与网络等待时间；官方 `execute` 计时值保留在明细 JSON 的 `exec_ms` 字段中。",
+        "- **表/字段 P/R**：使用 SQLite authorizer 在 `EXPLAIN` 准备阶段提取 GT/Pred SQL "
+        "实际读取的表与列（不执行查询；含 JOIN/WHERE/GROUP BY/ORDER BY 引用的列），"
+        "字段按 `表名.列名` 集合计算。"
+        "Micro 为全题 TP/FP/FN 汇总，Macro 为逐题 P/R 平均；"
+        "空 SQL 或无法解析的预测按空集合计入，GT schema 不可解析的题目从指标中剔除。",
         "",
     ]
     return "\n".join(lines)

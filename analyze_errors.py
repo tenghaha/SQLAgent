@@ -1,5 +1,9 @@
 """错例分析 CLI：读取已有评测报告与 preds，产出可复用的错例分析报告。
 
+分析内容包括：错例抽样对比、难度/结构统计、表/字段 P/R、规则归因与
+全量错例明细。表/字段集合优先复用评测明细，旧报告则通过 SQLite
+authorizer + EXPLAIN 从 GT/Pred SQL 中提取，不执行查询。
+
 用法:
     python analyze_errors.py --dataset bird --split mini_dev
     python analyze_errors.py --eval-report outputs/reports/eval_bird_mini_dev.json \
