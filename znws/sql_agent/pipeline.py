@@ -1,4 +1,4 @@
-"""编排层：把 QueryProcessor、DataLoader 与 Worker 串成一次独立运行，并产出可复现的结果对象。"""
+"""编排层：把 QueryProcessor、DataLoader、Worker 与 FinalAlign 串成一次独立运行，并产出可复现的结果对象。"""
 import math
 import sqlite3
 from dataclasses import asdict, dataclass, field
@@ -16,6 +16,7 @@ from znws.utils.dataset import (
 
 from .config import DEFAULT_RECURSION_LIMIT, build_model
 from .dataloader import SchemaPlan, run_data_loader
+from .final_align import FinalAlignedSql, run_final_align
 from .query_processor import QueryProcessResult, run_query_processor
 from .tracing import DEFAULT_LOG_DIR, RunRecorder
 from .worker import SqlAnswer, run_worker
@@ -121,6 +122,7 @@ def run_sql_agent(
 
     plan: Optional[SchemaPlan] = None
     answer: Optional[SqlAnswer] = None
+    aligned: Optional[FinalAlignedSql] = None
     processed: Optional[QueryProcessResult] = None
     execution: Optional[dict] = None
     error: Optional[str] = None
@@ -152,7 +154,29 @@ def run_sql_agent(
             recursion_limit=recursion_limit,
         )
         if answer and answer.sql.strip():
-            execution = execute_sql_preview(answer.sql, max_rows=max_rows)
+            # 最终对齐：一次独立 LLM 调用审查冗余列，验证失败时回退到对齐前的 SQL
+            aligned = run_final_align(
+                query=query,
+                sql=answer.sql,
+                model=model,
+                recorder=recorder,
+            )
+            if aligned and aligned.sql.strip():
+                aligned_execution = execute_sql_preview(aligned.sql, max_rows=max_rows)
+                if aligned_execution.get("status") == "success":
+                    recorder.note("Pipeline", "最终对齐 SQL 验证通过，采用对齐后的 SQL")
+                    answer = SqlAnswer(
+                        sql=aligned.sql, explanation=aligned.explanation
+                    )
+                    execution = aligned_execution
+                else:
+                    recorder.note(
+                        "Pipeline",
+                        "最终对齐 SQL 验证失败，回退到对齐前的 SQL: "
+                        f"{aligned_execution.get('error')}",
+                    )
+            if execution is None:
+                execution = execute_sql_preview(answer.sql, max_rows=max_rows)
             recorder.note(
                 "Pipeline",
                 f"最终 SQL 复算结果: status={execution.get('status')}, "
@@ -170,6 +194,7 @@ def run_sql_agent(
         "模型": model_label,
         "Query 处理": processed.to_dict() if processed else None,
         "Schema 方案": plan.model_dump() if plan else None,
+        "最终对齐": aligned.model_dump() if aligned else None,
         "最终 SQL": answer.sql if answer else None,
         "执行结果": execution,
         "错误": error,
