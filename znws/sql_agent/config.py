@@ -13,8 +13,10 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 # 数据库类型与时间格式的全局配置说明（随 BIRD 数据集更新）
 DB_CONFIG_PATH = BASE_DIR / "znws" / "agent" / "prompts" / "db_config.md"
 
-# agent 单轮运行的最大步数，防止模型陷入无限循环
-DEFAULT_RECURSION_LIMIT = 30
+# agent 单轮运行的最大步数，防止模型陷入无限循环。
+# 合并后的 Worker 在一次运行内要完成探查、Schema 定位、SQL 生成与验证，
+# 因此上限按原两个阶段之和放宽（30 + 30 的近似值）。
+DEFAULT_RECURSION_LIMIT = 50
 
 
 def load_db_config() -> str:

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from znws.sql_agent import run_sql_agent
+from znws.sql_agent.config import DEFAULT_RECURSION_LIMIT
 from znws.sql_agent.tracing import DEFAULT_LOG_DIR
 from znws.utils.dataset import default_dataset_name, default_split, load_questions
 from znws.utils.evaluation import evaluate_preds, format_summary, write_report
@@ -85,8 +86,8 @@ def main() -> int:
     parser.add_argument("--retries", type=int, default=0,
                         help="单题失败后的额外重试次数（默认 0，靠 --resume 跨批次重试）")
     parser.add_argument("--retry-backoff", type=float, default=5.0, help="重试前等待秒数")
-    parser.add_argument("--recursion-limit", type=int, default=30,
-                        help="单个 ReAct agent 的最大步数")
+    parser.add_argument("--recursion-limit", type=int, default=DEFAULT_RECURSION_LIMIT,
+                        help="Worker agent 的最大步数")
     parser.add_argument("--no-eval", action="store_true", help="只推理，不执行评测")
     parser.add_argument("--report", default=None, help="评测报告路径（缺省 outputs/reports/eval_<dataset>_<split>.md）")
     parser.add_argument("--ves-iterations", type=int, default=100,

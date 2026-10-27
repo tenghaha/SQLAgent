@@ -4,7 +4,7 @@
 1. 通过 ``load_bird_evidence`` 读取题目对应的 BIRD 外部知识（evidence）；
 2. 第一次 LLM 调用抽取实体并标注类别（标准 NER 类别 + “统计指标”）；
 3. 第二次 LLM 调用结合实体与外部知识改写问题，并做多步子句分解；
-4. 把改写结果与 evidence 一起交付 DataLoader 与 Worker 参考。
+4. 把改写结果与 evidence 一起交付 Worker 参考。
 
 为便于后续扩展，各步骤封装为独立函数，统一通过 QueryProcessResult 交付结果；
 以后可在 run_query_processor 中插入更多 NLU 步骤，或把本模块直接包装成可
@@ -63,7 +63,7 @@ class QueryRewrite(BaseModel):
 
 @dataclass
 class QueryProcessResult:
-    """QueryProcessor 交付给 DataLoader / Worker 的完整 NLU 结果。"""
+    """QueryProcessor 交付给 Worker 的完整 NLU 结果。"""
 
     original_query: str
     rewritten_query: str
@@ -196,7 +196,7 @@ def run_query_processor(
     dataset: Optional[str] = None,
     split: Optional[str] = None,
 ) -> QueryProcessResult:
-    """运行 QueryProcessor，返回供 DataLoader / Worker 消费的规范化结果。
+    """运行 QueryProcessor，返回供 Worker 消费的规范化结果。
 
     evidence 缺省时通过 load_bird_evidence 按 question_id 读取；
     也可由调用方直接传入 evidence 文本，便于独立运行与测试。

@@ -1,4 +1,4 @@
-"""两个 ReAct agent 共用的执行封装：流式运行 + 过程记录 + 结构化输出。"""
+"""Worker agent 的执行封装：流式运行 + 过程记录 + 结构化输出。"""
 from typing import Any, Optional, Tuple, Type
 
 from langchain.agents import create_agent

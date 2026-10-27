@@ -1,4 +1,4 @@
-"""编排层：把 QueryProcessor、DataLoader 与 Worker 串成一次独立运行，并产出可复现的结果对象。"""
+"""编排层：把 QueryProcessor 与 Worker 串成一次独立运行，并产出可复现的结果对象。"""
 import math
 import sqlite3
 from dataclasses import asdict, dataclass, field
@@ -15,7 +15,6 @@ from znws.utils.dataset import (
 )
 
 from .config import DEFAULT_RECURSION_LIMIT, build_model
-from .dataloader import SchemaPlan, run_data_loader
 from .query_processor import QueryProcessResult, run_query_processor
 from .tracing import DEFAULT_LOG_DIR, RunRecorder
 from .worker import SqlAnswer, run_worker
@@ -34,7 +33,6 @@ class SQLAgentResult:
     split: Optional[str]
     log_path: str
     model: str
-    schema_plan: Optional[dict]
     final_sql: Optional[str]
     explanation: Optional[str]
     execution: Optional[dict]
@@ -119,7 +117,6 @@ def run_sql_agent(
 
     recorder = RunRecorder(query=query, log_dir=log_dir, echo=echo, model=model_label)
 
-    plan: Optional[SchemaPlan] = None
     answer: Optional[SqlAnswer] = None
     processed: Optional[QueryProcessResult] = None
     execution: Optional[dict] = None
@@ -134,21 +131,14 @@ def run_sql_agent(
             dataset=dataset,
             split=split,
         )
-        plan, _ = run_data_loader(
-            query=processed.rewritten_query,
+        answer, _ = run_worker(
+            query=query,
+            rewritten_query=processed.rewritten_query,
             entities=processed.entities,
             sub_queries=processed.sub_queries,
             evidence=processed.evidence,
             model=model,
             recorder=recorder,
-            recursion_limit=recursion_limit,
-        )
-        answer, _ = run_worker(
-            query=query,
-            plan=plan,
-            model=model,
-            recorder=recorder,
-            evidence=processed.evidence,
             recursion_limit=recursion_limit,
         )
         if answer and answer.sql.strip():
@@ -169,7 +159,6 @@ def run_sql_agent(
         "数据库": f"{db_id} ({split})",
         "模型": model_label,
         "Query 处理": processed.to_dict() if processed else None,
-        "Schema 方案": plan.model_dump() if plan else None,
         "最终 SQL": answer.sql if answer else None,
         "执行结果": execution,
         "错误": error,
@@ -184,7 +173,6 @@ def run_sql_agent(
         split=split,
         log_path=str(recorder.log_path),
         model=model_label,
-        schema_plan=plan.model_dump() if plan else None,
         final_sql=answer.sql if answer else None,
         explanation=answer.explanation if answer else None,
         execution=execution,

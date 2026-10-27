@@ -88,17 +88,6 @@ def main() -> int:
         max_rows=args.max_rows,
     )
 
-    plan = result.schema_plan
-    print("\n[Schema 方案]")
-    if plan:
-        print(f"  表        : {', '.join(plan.get('tables') or [])}")
-        print(f"  字段      : {', '.join(plan.get('fields') or [])}")
-        print(f"  统计字段  : {', '.join(plan.get('statistics_fields') or []) or '无'}")
-        print(f"  外键关系  : {', '.join(plan.get('relationships') or []) or '无'}")
-        print(f"  理由      : {plan.get('reasoning')}")
-    else:
-        print("  未获得结构化 Schema 方案")
-
     print("\n[最终 SQL]")
     print(result.final_sql or "  （未产出 SQL）")
 

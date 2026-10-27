@@ -12,8 +12,9 @@ from znws.agent.tools.schema_retriever import (
 )
 from znws.agent.tools.sql_tools import execute_sql, get_table_schema
 
-# DataLoader 用于“探查数据库 -> 确定表与字段”：SQL 工具 + 向量库工具
-DATA_LOADER_TOOLS = [
+# Worker 在单一智能体内完成探查、Schema 定位与 SQL 生成验证，因此同时具备
+# 数据库探查工具（目录 / 结构 / 抽样库检索）与 SQL 执行验证工具
+WORKER_TOOLS = [
     get_table_directory,
     get_table_schema,
     execute_sql,
@@ -21,14 +22,7 @@ DATA_LOADER_TOOLS = [
     search_schema_by_value,
 ]
 
-# Worker 用于“生成 -> 执行验证 -> 修正”：以执行工具为主，辅以表结构核对
-WORKER_TOOLS = [
-    execute_sql,
-    get_table_schema,
-]
-
 __all__ = [
-    "DATA_LOADER_TOOLS",
     "WORKER_TOOLS",
     "get_table_directory",
     "get_table_schema",
